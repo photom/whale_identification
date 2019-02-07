@@ -84,13 +84,12 @@ def main():
             continue
         x = create_unit_dataset(data_unit)
         predicts = test_model.predict([x])
-        # print(f"predicts:{predicts}")
         predicts = predicts.tolist()
         train_preds += predicts
         train_data_list.append(data_unit)
     train_preds = np.array(train_preds)
     print(f"train_preds:{train_preds.shape}")
-    # print(f"train_preds:{train_preds}")
+    print(f"train_preds:{train_preds}")
 
     test_preds = []
     test_data_list = []
@@ -102,7 +101,7 @@ def main():
         test_data_list.append(data_unit)
     test_preds = np.array(test_preds)
     print(f"test_preds: {test_preds.shape}")
-    # print(f"test_preds:{test_preds}")
+    print(f"test_preds:{test_preds}")
 
     neigh = NearestNeighbors(n_neighbors=6)
     neigh.fit(train_preds)
@@ -110,7 +109,6 @@ def main():
     # print(distances, neighbors)
     distances_test, neighbors_test = neigh.kneighbors(test_preds)
     distances_test, neighbors_test = distances_test.tolist(), neighbors_test.tolist()
-    preds_str = []
 
     df = pd.DataFrame([], columns=['Image', 'Id'])
     for data_unit, distance, neighbour_ in zip(test_data_list, distances_test, neighbors_test):
@@ -122,8 +120,12 @@ def main():
             sample_result.append((train_data_unit.answer, d))
 
         if NEW_LABEL not in sample_classes:
-            sample_result.append((NEW_LABEL, 0.1))
+            # pbr
+            # sample_result.append((NEW_LABEL, 0.0002))
+            # alpha
+            sample_result.append((NEW_LABEL, 0.003))
         sample_result.sort(key=lambda x: x[1])
+        # print(f"sample:{sample_result}")
         sample_result = sample_result[:5]
         pred_str = " ".join([x[0] for x in sample_result])
         df = df.append(pd.DataFrame([[data_unit.filename, pred_str]], columns=['Image', 'Id']),

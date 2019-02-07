@@ -3,6 +3,7 @@ import random
 import sys
 import pickle
 import pathlib
+import time
 
 from keras.preprocessing.image import ImageDataGenerator
 from keras.models import Model
@@ -54,8 +55,8 @@ def create_callbacks(dataset: Dataset, name_weights, patience_lr=10, patience_es
     early_stopping = EarlyStopping(monitor='val_loss', patience=patience_es, verbose=1, mode='auto')
     # return [early_stopping, mcp_save, reduce_lr_loss]
     # return [f1metrics, early_stopping, mcp_save]
-    # return [early_stopping, mcp_save, dataset]
-    return [mcp_save, dataset]
+    return [early_stopping, mcp_save, dataset]
+    # return [mcp_save, dataset]
 
 
 def load_dataset(filename):
@@ -66,48 +67,146 @@ def load_dataset(filename):
     return train_dataset
 
 
+def get_batch(batch_size, s="train"):
+    """
+    Create batch of n pairs, half same class, half different class
+    """
+    if s == 'train':
+        X = Xtrain
+        categories = train_classes
+    else:
+        X = Xval
+        categories = val_classes
+    n_classes, n_examples, w, h = X.shape
+    # randomly sample several classes to use in the batch
+    categories = rng.choice(n_classes, size=(batch_size,), replace=False)
+
+    # initialize 2 empty arrays for the input image batch
+    pairs = [np.zeros((batch_size, h, w, 1)) for i in range(2)]
+
+    # initialize vector for the targets
+    targets = np.zeros((batch_size,))
+
+    # make one half of it '1's, so 2nd half of batch has same class
+    targets[batch_size // 2:] = 1
+    for i in range(batch_size):
+        category = categories[i]
+        idx_1 = rng.randint(0, n_examples)
+        pairs[0][i, :, :, :] = X[category, idx_1].reshape(w, h, 1)
+        idx_2 = rng.randint(0, n_examples)
+
+        # pick images of same class for 1st half, different for 2nd
+        if i >= batch_size // 2:
+            category_2 = category
+        else:
+            # add a random number to the category modulo n classes to ensure 2nd image has a different category
+            category_2 = (category + rng.randint(1, n_classes)) % n_classes
+
+        pairs[1][i, :, :, :] = X[category_2, idx_2].reshape(w, h, 1)
+
+    return pairs, targets
+
+
 def next_dataset(dataset: Dataset, batch_size: int, datatype: DataType):
+    # for klass, data_list in dataset.class_map.items():
+    #     print(
+    #         f"class:{klass} datatype:{datatype} train_class_map:{len(dataset.train_class_map[klass])} validate_class_map:{len(dataset.validate_class_map[klass])}")
+    while True:
+        anchor_input = []
+        positive_input = []
+        negative_input = []
+
+        # setup batch dataset
+        for i in range(batch_size):
+            # make anchor
+            x, y, data_unit = create_xy(dataset, datatype)
+            anchor_input.append(x)
+            # make positive
+            if datatype == DataType.train:
+                positive_list = dataset.train_class_map[data_unit.answer]
+            elif datatype == DataType.validate:
+                while data_unit.answer not in dataset.validate_class_map:
+                    print(f"failed to find label in validate dataset. label={data_unit.answer} map:{list(dataset.validate_class_map.keys())}")
+                    time.sleep(3)
+                    x, y, data_unit = create_xy(dataset, datatype)
+                positive_list = dataset.validate_class_map[data_unit.answer]
+            else:
+                raise RuntimeError(f"invalid type:{str(datatype)}")
+            positive = np.random.choice(positive_list)
+            # Make sure it's not comparing to itself
+            if len(positive_list) > 1:
+                while data_unit.uuid == positive.uuid:
+                    positive = np.random.choice(positive_list)
+            x_positive = create_unit_dataset(positive)
+            # y_positive = dataset.classes.tolist().index(positive.answer)
+            positive_input.append(x_positive)
+
+            # make negative
+            negative = None
+            negative_class = data_unit.answer
+            # Make sure it's not comparing to itself
+            while data_unit.answer == negative_class:
+                if datatype == DataType.train:
+                    compare_to_index = np.random.choice(dataset.train_index_list)
+                elif datatype == DataType.validate:
+                    compare_to_index = np.random.choice(dataset.validate_index_list)
+                else:
+                    raise RuntimeError(f"invalid datatype:{str(datatype)}")
+                negative = dataset.data_list[compare_to_index]
+                negative_class = negative.answer
+            x_negative = create_unit_dataset(negative)
+            negative_input.append(x_negative)
+            # y_negative = dataset.classes.tolist().index(negative.answer)
+
+        yield [np.array(anchor_input).reshape(-1, IMAGE_SIZE, IMAGE_SIZE, 3),
+               np.array(positive_input).reshape(-1, IMAGE_SIZE, IMAGE_SIZE, 3),
+               np.array(negative_input).reshape(-1, IMAGE_SIZE, IMAGE_SIZE, 3)], np.ones(batch_size)
+
+
+def next_dataset_old(dataset: Dataset, batch_size: int, datatype: DataType):
     """ Obtain a batch of training data
     """
     while True:
-        x_batch = []
-        y_batch = []
-        for i in range(batch_size):
-            x, y = create_xy(dataset, datatype)
-            x_batch.append(x)
-            y_batch.append(y)
-        x_batch, y_batch = np.array(x_batch), np.array(y_batch)
+        yield get_batch(dataset, batch_size, datatype)
+        # x_batch = []
+        # y_batch = []
+        # for i in range(batch_size):
+        #     x, y = create_xy(dataset, datatype)
+        #     x_batch.append(x)
+        #     y_batch.append(y)
+        # x_batch, y_batch = np.array(x_batch), np.array(y_batch)
         # print(f"x:{x.shape}")
         # image_gen.fit(x, augment=True)
         # print(f"next_dataset x_list:{np.array(x).shape} y_data:{np.array(y).shape}")
-        if datatype != DataType.test:
-            x_batch = seq.augment_images(x_batch).astype("float32")
-            yield IMAGE_GEN.standardize(x_batch), y_batch
-            # x_batch, y_batch = next(IMAGE_GEN.flow(x_batch, y_batch, batch_size=batch_size))
-            # print(f"next_dataset x_list:{x_batch} y_data:{y_batch}")
-            # yield x_batch, y_batch
-            # do_augment = np.random.randint(BATCH_SIZE)
-            # if do_augment:
-            #     yield seq.augment_images(x), y
-            # else:
-            #     yield x, y
-        else:
-            yield x_batch, y_batch
+        # if datatype != DataType.test:
+        # x_batch = seq.augment_images(x_batch).astype("float32")
+        # yield IMAGE_GEN.standardize(x_batch), y_batch
+        # x_batch, y_batch = next(IMAGE_GEN.flow(x_batch, y_batch, batch_size=batch_size))
+        # print(f"next_dataset x_list:{x_batch} y_data:{y_batch}")
+        # yield x_batch, y_batch
+        # do_augment = np.random.randint(BATCH_SIZE)
+        # if do_augment:
+        #     yield seq.augment_images(x), y
+        # else:
+        #     yield x, y
+        # else:
+        # yield x_batch, y_batch
 
 
 def train_model(model: Model, dataset: Dataset, model_filename: str,
                 batch_size=BATCH_SIZE,
-                num_train_examples=(27434 * TRAIN_RATIO),
-                num_valid_samples=(27434 * VALIDATE_RATIO),
-                # num_train_examples=29450 // 4,
-                # num_valid_samples=1550,
-                epochs=EPOCHS,):
+                epochs=EPOCHS, ):
     callbacks = create_callbacks(dataset, model_filename)
-    steps_per_epoch = num_train_examples // batch_size
-    # steps_per_epoch = 200
 
-    # print(f"class_weights:{class_weight}")
-    validation_steps = num_valid_samples // batch_size
+    answers = [data_unit.answer for data_unit in dataset.data_list]
+    new_whale_num = answers.count(NEW_LABEL)
+    sample_num = len(answers) - new_whale_num
+    train_num = (sample_num * TRAIN_RATIO)
+    validate_num = (sample_num * VALIDATE_RATIO)
+    steps_per_epoch = train_num // batch_size
+    validation_steps = validate_num // batch_size
+    print(f"new_whale_num:{new_whale_num} sample_num:{sample_num} train_num:{train_num} validate_num:{validate_num}")
+
     model.fit_generator(generator=next_dataset(dataset, batch_size, DataType.train),
                         epochs=epochs,
                         validation_data=next_dataset(dataset, batch_size, DataType.validate),
