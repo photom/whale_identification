@@ -13,13 +13,19 @@ import threading
 import keras
 import pandas as pd
 import numpy as np
+from numpy.linalg import inv as mat_inv
 from PIL import Image
+from PIL import ImageOps
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
 from sklearn.model_selection import StratifiedKFold, RepeatedStratifiedKFold
+from sklearn.metrics import pairwise_distances
 from iterstrat.ml_stratifiers import RepeatedMultilabelStratifiedKFold
 from skmultilearn import model_selection
 from keras.callbacks import Callback
 from keras.preprocessing.image import ImageDataGenerator
+from keras.optimizers import Adam, Nadam
+
+import bounding_box
 
 RANDOM_NUM = 77777
 IMAGE_BASE_DIR = '../whale_identification_dataset'
@@ -30,12 +36,15 @@ TEST_DIR = IMAGE_BASE_DIR + '/test'
 TRAIN_RATIO = 0.9
 VALIDATE_RATIO = 0.1
 TEST_RATIO = 0.05
+BOUNDING_BOX_MAP = 'bounding-box-map.pickle'
 
-IMAGE_SIZE = 200
-IMAGE_MINMAX_MAP = {}
+IMAGE_SIZE = 256
+IMAGE_DIM = 1
 BATCH_SIZE = 5
 EPOCHS = 30
 NEW_LABEL = 'new_whale'
+ROI_MAP = {}
+
 
 IMAGE_GEN = ImageDataGenerator(
     # featurewise_center=True,
@@ -88,6 +97,9 @@ class Dataset(Callback):
         self.index_generator = None
         self.label_onehot_encoder = None
         self.lock = threading.Lock()
+        self.model = None
+        self.score = np.random.rand(len(data_list), len(data_list))
+        np.fill_diagonal(self.score, 0.0)
 
     def on_train_begin(self, logs=None):
         sss = RepeatedStratifiedKFold(n_splits=10, n_repeats=10, random_state=RANDOM_NUM)
@@ -99,9 +111,29 @@ class Dataset(Callback):
         finally:
             self.lock.release()
 
+    def calc_score(self):
+        print("start calculating score")
+        train_preds = []
+        for data_units in np.array_split(np.array(self.data_list), 100):
+            inputs = []
+            for data_unit in data_units:
+                x = create_unit_dataset(self, data_unit)
+                inputs.append(x)
+            inputs = np.array(inputs).reshape((-1, IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM))
+            print(f"data_units:{len(data_units)} inputs:{np.array(inputs).shape}")
+            predicts = self.model.submodel.predict([inputs])
+            print(f"predicts:{predicts.shape}")
+            predicts = predicts.tolist()
+            train_preds += predicts
+        print(f"train_preds:{np.array(train_preds).shape}")
+        self.score = pairwise_distances(train_preds)
+        np.fill_diagonal(self.score, 0.0)
+        print("finished calculating score")
+
     def on_epoch_end(self, epoch, logs=None):
         self.lock.acquire()
         try:
+            self.calc_score()
             self.set_index_list()
         finally:
             self.lock.release()
@@ -152,12 +184,12 @@ class Dataset(Callback):
             index = self.train_index_list[self.train_counter]
             data_unit = self.data_list[index]
             # wait until set_index_list finished
-            while data_unit.answer not in list(self.train_class_map.keys()):
+            while data_unit.answer == NEW_LABEL or data_unit.answer not in list(self.train_class_map.keys()):
                 self.increment_train()
                 index = self.train_index_list[self.train_counter]
                 data_unit = self.data_list[index]
             # print(f"next_train_data index:{index}")
-            return data_unit
+            return data_unit, index
         finally:
             self.lock.release()
 
@@ -168,13 +200,13 @@ class Dataset(Callback):
             index = self.validate_index_list[self.validate_counter]
             data_unit = self.data_list[index]
             # wait until set_index_list finished
-            while data_unit.answer not in list(self.validate_class_map.keys()):
+            while data_unit.answer == NEW_LABEL or data_unit.answer not in list(self.validate_class_map.keys()):
                 self.increment_validate()
                 index = self.validate_index_list[self.validate_counter]
                 data_unit = self.data_list[index]
                 if data_unit.answer not in list(self.validate_class_map.keys()):
                     print(f"klass not included in validate map. class:{data_unit.answer} validate_map:{list(self.validate_class_map.keys())}")
-            return data_unit
+            return data_unit, index
         finally:
             self.lock.release()
 
@@ -193,6 +225,14 @@ class DataUnit:
 
 
 def load_raw_data():
+    bounding_box_model = bounding_box.build_bounding_box_model(with_dropout=False)
+    bounding_box_model.load_weights('bounding_box/cropping.model')
+    bounding_box_model.compile(Adam(lr=0.002), loss='mean_squared_error')
+    global ROI_MAP
+    if os.path.exists(BOUNDING_BOX_MAP):
+        with open(BOUNDING_BOX_MAP, 'rb') as f:
+            ROI_MAP = pickle.load(f)
+
     data_list = []
     class_map = {}
     answers = []
@@ -215,6 +255,13 @@ def load_raw_data():
                 if answer not in class_map:
                     class_map[answer] = []
                 class_map[answer].append(data_unit)
+                if filename not in ROI_MAP:
+                    img, trans = bounding_box.read_for_validation(data_unit.filename)
+                    x = np.expand_dims(img, axis=0)
+                    x0, y0, x1, y1 = bounding_box_model.predict(x).squeeze()
+                    (u0, v0), (u1, v1) = bounding_box.coord_transform([(x0, y0), (x1, y1)], trans)
+                    coords = u0, v0, u1, v1
+                    ROI_MAP[data_unit.filename] = coords
 
     # complement single class for stratified K-fold
     single_classes = []
@@ -231,20 +278,46 @@ def load_raw_data():
     for uuuid in uuids:
         if uuids.count(uuuid) > 1:
             print(f"uuid: {uuuid} count:{uuids.count(uuuid)}")
-            assert(uuids.count(uuuid) <= 1)
+            assert (uuids.count(uuuid) <= 1)
     # set up one hot encoder
     lohe = LabelOneHotEncoder()
     # y_list = lohe.fit_transform(answers).toarray()
     lohe.fit_transform(answers)
     dataset.label_onehot_encoder = lohe
     # print(f"data_list:{dataset.data_list.shape} y_list:{dataset.y_list.shape} class_counts:{class_counts} y_indices:{y_indices} classes:{classes}")
+
+    if not os.path.exists(BOUNDING_BOX_MAP):
+        with open(BOUNDING_BOX_MAP, 'wb') as f:
+            pickle.dump(ROI_MAP, f)
     return dataset
 
 
 def load_test_data():
+    bounding_box_model = bounding_box.build_bounding_box_model(with_dropout=False)
+    bounding_box_model.load_weights('bounding_box/cropping.model')
+    bounding_box_model.compile(Adam(lr=0.002), loss='mean_squared_error')
+    global ROI_MAP
+    if os.path.exists(BOUNDING_BOX_MAP):
+        with open(BOUNDING_BOX_MAP, 'rb') as f:
+            ROI_MAP = pickle.load(f)
+
+    update_roi = False
     data_list = []
     for filename in os.listdir(TEST_DIR):
-        data_list.append(DataUnit(filename, None, TEST_DIR))
+        data_unit = DataUnit(filename, None, TEST_DIR)
+        data_list.append(data_unit)
+        if filename not in ROI_MAP:
+            update_roi = True
+            img, trans = bounding_box.read_for_validation(data_unit.filename)
+            x = np.expand_dims(img, axis=0)
+            x0, y0, x1, y1 = bounding_box_model.predict(x).squeeze()
+            (u0, v0), (u1, v1) = bounding_box.coord_transform([(x0, y0), (x1, y1)], trans)
+            coords = u0, v0, u1, v1
+            ROI_MAP[data_unit.filename] = coords
+
+    if update_roi:
+        with open(BOUNDING_BOX_MAP, 'wb') as f:
+            pickle.dump(ROI_MAP, f)
     return TestDataset(data_list)
 
 
@@ -252,25 +325,10 @@ def fit_image_generator(dataset: Dataset, test_dataset: TestDataset):
     # for data_list in [test_dataset.data_list, dataset.data_list]:
     for data_list in [dataset.data_list]:
         for data_unit in data_list:
-            x = generate_input(data_unit)
-            x_list = np.array([x]).reshape((-1, IMAGE_SIZE, IMAGE_SIZE, 3))
+            x = extract_roi(dataset, data_unit)
+            # x = generate_input(data_unit)
+            x_list = np.array([x]).reshape((-1, IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM))
             IMAGE_GEN.fit(x_list)
-
-
-def normalize_image(x: np.array, data_unit: DataUnit):
-    x = np.array(x)
-    if data_unit.filename in IMAGE_MINMAX_MAP:
-        min_val, max_val = IMAGE_MINMAX_MAP[data_unit.filename]
-    else:
-        min_val, max_val = float(x.min()), float(x.max())
-        IMAGE_MINMAX_MAP[data_unit.filename] = (min_val, max_val)
-    if max_val > min_val + np.finfo(float).eps:
-        x = (x - min_val) / (max_val - min_val)
-    else:
-        print(f"too small difference. file={data_unit.filename}")
-        x = x / 255.0
-    x = np.stack(x, axis=1)
-    return x
 
 
 def create_xy(dataset: Dataset, datatype: DataType):
@@ -287,17 +345,18 @@ def create_xy(dataset: Dataset, datatype: DataType):
     # data_unit = dataset.data_list[index]
     # print("create_xy")
     if datatype == DataType.train:
-        data_unit = dataset.next_train_data()
+        data_unit, index = dataset.next_train_data()
     elif datatype == DataType.validate:
-        data_unit = dataset.next_validate_data()
+        data_unit, index = dataset.next_validate_data()
     else:
         raise RuntimeError(f"invalid data type. type={str(datatype)}")
     # print(f"create_xy data_unit:{data_unit.answer}")
-    x = generate_input(data_unit)
+    # x = generate_input(data_unit)
+    x = extract_roi(dataset, data_unit)
     # x = normalize_image(x, data_unit)
     y = dataset.classes.tolist().index(data_unit.answer)
     # print(f"create_training_sample x:{x.shape} y:{y.shape}")
-    return x, y, data_unit
+    return x, y, data_unit, index
 
 
 def make_square(img, min_size=10, fill_color=(0, 0, 0, 0)):
@@ -323,10 +382,27 @@ def generate_input(data_unit: DataUnit):
     return img
 
 
-def create_unit_dataset(data_unit: DataUnit):
-    x = generate_input(data_unit)
+def extract_roi(dataset: Dataset, data_unit: DataUnit):
+    if data_unit.filename in ROI_MAP:
+        coords = ROI_MAP[data_unit.filename]
+    else:
+        raise RuntimeError(f"not found coords in ROI_MAP. filename:{data_unit.filename}")
+    file_path = Path(data_unit.source_dir, data_unit.filename)
+    img = Image.open(str(file_path))
+    img = img.crop(coords)
+    img = img.resize((IMAGE_SIZE, IMAGE_SIZE), resample=Image.LANCZOS)
+    img = np.array(img.convert('L')).reshape(IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM)
+    # if img.ndim == 2:  # imported BW picture and converting to "dumb RGB"
+    #     img = np.tile(img, (3, 1, 1)).transpose((1, 2, 0))
+    # print(f"img:{img.shape}")
+    return bounding_box.normalize(img.astype("float32"))
+
+
+def create_unit_dataset(dataset: Dataset, data_unit: DataUnit):
+    # x = generate_input(data_unit)
+    x = extract_roi(dataset, data_unit)
     x = x.astype("float32")
-    return IMAGE_GEN.standardize(x.reshape(1, IMAGE_SIZE, IMAGE_SIZE, 3))
+    return x.reshape(1, IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM)
 
 
 def load_dataset(filename):

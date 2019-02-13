@@ -239,10 +239,12 @@ class TripletLossLayer(Layer):
         return loss
 
 
-def build_triplet_trunk_model(input_tensor, dropout=0.5, datatype: DataType = DataType.train, layer_name='anchor'):
+def build_triplet_trunk_model(input_tensor, dropout=0.5, datatype: DataType = DataType.train,
+                              layer_name='anchor'):
     # Convolutional Neural Network
     # base_input = Input(shape=input_shape)
-    base_model = ResNet50(weights='imagenet', include_top=False, input_tensor=input_tensor, pooling=None)
+    # base_model = ResNet50(weights='imagenet', include_top=False, input_tensor=input_tensor, pooling=None)
+    base_model = ResNet50(weights=None, include_top=False, input_tensor=input_tensor, pooling=None)
 
     x = GlobalAveragePooling2D()(base_model.layers[-1].output)
     # x = GlobalMaxPooling2D()(base_model.output)
@@ -260,26 +262,25 @@ def build_triplet_trunk_model(input_tensor, dropout=0.5, datatype: DataType = Da
     #     x = Dropout(dropout)(x)
     x = Dense(256, name='dense_layer')(x)
     # L2 normalization
-    x = Lambda(lambda x: K.l2_normalize(x, axis=1))(x)
+    x = Lambda(lambda xi: K.l2_normalize(xi, axis=1))(x)
 
-    tmp_model = Model(inputs=[input_tensor], outputs=[x])
-
+    tmp_model = Model(input_tensor, x)
     for idx, layer in enumerate(tmp_model.layers):
         layer.trainable = True
-        layer.name = f"{layer_name}_{idx}"
+        # layer.name = f"{layer_name}_{idx}"
     return tmp_model
 
 
 def create_model_triplet_loss(dataset: Dataset, input_shape, dropout=0.5, datatype: DataType = DataType.train):
+    # loss: 1.5538e-05 - val_loss: 0.0204 lr=0.0000001 alpha=0.005
     anchor_input = Input(shape=input_shape)
     positive_input = Input(shape=input_shape)
     negative_input = Input(shape=input_shape)
-    anchor_model = build_triplet_trunk_model(anchor_input, dropout, datatype, 'anchor')
-    positive_model = build_triplet_trunk_model(positive_input, dropout, datatype, 'positive')
-    negative_model = build_triplet_trunk_model(negative_input, dropout, datatype, 'negative')
-    anchor_embedding = anchor_model.output
-    positive_embedding = positive_model.output
-    negative_embedding = negative_model.output
+    base_input = Input(shape=input_shape)
+    trunk_model = build_triplet_trunk_model(base_input, dropout, datatype)
+    anchor_embedding = trunk_model(anchor_input)
+    positive_embedding = trunk_model(positive_input)
+    negative_embedding = trunk_model(negative_input)
     # distance_func = Lambda(lambda tensors: K.sum(K.square(tensors[0] - tensors[1]), axis=1, keepdims=True),
     #                        name='distance')
     # triplet_loss_func = Lambda(lambda loss: K.maximum(loss[0] - loss[1] + alpha, 0.0),
@@ -287,9 +288,15 @@ def create_model_triplet_loss(dataset: Dataset, input_shape, dropout=0.5, dataty
     # p_distance = distance_func([anchor_embedding, positive_embedding])
     # n_distance = distance_func([anchor_embedding, negative_embedding])
     # final_loss = triplet_loss_func([p_distance, n_distance])
-    triplet_loss_func = Lambda(lambda x_input: calc_triplet_loss(x_input), name='triplet_loss')
-    final_loss = triplet_loss_func([anchor_embedding, positive_embedding, negative_embedding])
+    # xa_inp = Input(shape=trunk_model.output_shape[1:])
+    # xp_inp = Input(shape=trunk_model.output_shape[1:])
+    # xn_inp = Input(shape=trunk_model.output_shape[1:])
 
+    # final_loss = triplet_loss_func([xa_inp, xp_inp, xn_inp])
+
+    # head_model = Model([xa_inp, xp_inp, xn_inp], final_loss)
+    # model = Model([anchor_input, positive_input, negative_input],
+    #               head_model([anchor_embedding, positive_embedding, negative_embedding]))
     # BPR loss
     # final_loss = 1.0 - K.sigmoid(
     #     K.sum(anchor_embedding * positive_embedding, axis=-1, keepdims=True) -
@@ -297,16 +304,20 @@ def create_model_triplet_loss(dataset: Dataset, input_shape, dropout=0.5, dataty
     # bpr_triplet_loss_func = Lambda(lambda x_input: bpr_triplet_loss(x_input), name='loss')
     # final_loss = bpr_triplet_loss_func([anchor_embedding, positive_embedding, negative_embedding])
 
-    model = Model(inputs=[anchor_input, positive_input, negative_input],
-                  outputs=final_loss)
+    triplet_loss_func = Lambda(lambda x_input: calc_triplet_loss(x_input), name='triplet_loss')
+    final_loss = triplet_loss_func([anchor_embedding, positive_embedding, negative_embedding])
+    model = Model([anchor_input, positive_input, negative_input], final_loss)
 
+    for idx, layer in enumerate(model.layers):
+        layer.trainable = True
     # triplet_loss_layer = TripletLossLayer(alpha=0.2, name='triplet_loss_layer')([embedding_a, embedding_p, embedding_n])
     # model = Model([anchor_input, positive_input, negative_input], triplet_loss_layer)
+    model.submodel = trunk_model
     model.summary()
     return model
 
 
-def calc_triplet_loss(x, alpha=0.005):
+def calc_triplet_loss(x, alpha=0.01):
     anchor, positive, negative = x
 
     pos_dist = tf.reduce_sum(tf.square(tf.subtract(anchor, positive)), 1)
@@ -352,12 +363,10 @@ def bpr_triplet_loss(X):
     :return:
     """
     user_latent, negative_item_latent, positive_item_latent = X
-
     # BPR loss
     loss = 1.0 - K.sigmoid(
         K.sum(user_latent * positive_item_latent, axis=-1, keepdims=True) -
         K.sum(user_latent * negative_item_latent, axis=-1, keepdims=True))
-
     return loss
 
 
@@ -370,9 +379,9 @@ def build_inference_model(weight_path: str, dataset: Dataset, input_shape,
     anchor_input = Input(shape=input_shape)
     positive_input = Input(shape=input_shape)
     negative_input = Input(shape=input_shape)
-    anchor_model = build_triplet_trunk_model(anchor_input, dropout, datatype, 'anchor')
-    positive_model = build_triplet_trunk_model(positive_input, dropout, datatype, 'positive')
-    negative_model = build_triplet_trunk_model(negative_input, dropout, datatype, 'negative')
+    anchor_model = build_triplet_trunk_model(anchor_input, dropout, datatype, layer_name='anchor')
+    positive_model = build_triplet_trunk_model(positive_input, dropout, datatype, layer_name='positive')
+    negative_model = build_triplet_trunk_model(negative_input, dropout, datatype, layer_name='negative')
     anchor_embedding = anchor_model.output
     positive_embedding = positive_model.output
     negative_embedding = negative_model.output
@@ -384,17 +393,47 @@ def build_inference_model(weight_path: str, dataset: Dataset, input_shape,
                   outputs=final_loss)
     model.load_weights(weight_path)
 
-    inference_model = Model(anchor_model.get_input_at(0), output=anchor_model.get_output_at(0))
+    inference_model = Model(inputs=[anchor_model.get_input_at(0)], outputs=[anchor_model.get_output_at(0)])
     print(inference_model.summary())
 
     return inference_model
 
 
-def build_model(model: Model, model_filename: str = None, learning_rate=0.00000005):
+def build_anchor_model(weight_path: str, input_shape,
+                       dropout=0.5, datatype: DataType = DataType.train):
+    anchor_input = Input(shape=input_shape)
+    positive_input = Input(shape=input_shape)
+    negative_input = Input(shape=input_shape)
+    anchor_model = build_triplet_trunk_model(anchor_input, dropout, datatype, layer_name='anchor')
+    positive_model = build_triplet_trunk_model(positive_input, dropout, datatype, layer_name='positive')
+    negative_model = build_triplet_trunk_model(negative_input, dropout, datatype, layer_name='negative')
+    anchor_embedding = anchor_model.output
+    positive_embedding = positive_model.output
+    negative_embedding = negative_model.output
+
+    bpr_triplet_loss_func = Lambda(lambda x_input: bpr_triplet_loss(x_input), name='loss')
+
+    final_loss = bpr_triplet_loss_func([anchor_embedding, positive_embedding, negative_embedding])
+    model = Model(inputs=[anchor_input, positive_input, negative_input],
+                  outputs=final_loss)
+    if os.path.exists(weight_path):
+        model.load_weights(weight_path)
+
+    inference_model = Model(inputs=[anchor_model.get_input_at(0)], outputs=[anchor_model.get_output_at(0)])
+    # print(inference_model.summary())
+    return anchor_input, inference_model
+
+
+def build_model(model: Model, model_filename: str = None, learning_rate=0.000005):
     if model_filename and os.path.exists(model_filename):
         print(f"load weights: file={model_filename}")
         model.load_weights(model_filename)
-    opt = Nadam(lr=learning_rate, beta_1=0.9, beta_2=0.999)
+    submodel_filename = f"{model_filename}.submodel"
+    if submodel_filename and os.path.exists(submodel_filename):
+        print(f"load weights: file={submodel_filename}")
+        model.submodel.load_weights(submodel_filename)
+
+    opt = Adam(lr=learning_rate, beta_1=0.9, beta_2=0.999)
     model.compile(
         # optimizer=keras.optimizers.Adadelta(),
         optimizer=opt,

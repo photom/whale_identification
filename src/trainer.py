@@ -49,12 +49,10 @@ else:
 def main():
     # Load audio segments using pydub
     dataset = load_raw_data()
-    test_dataset = load_test_data()
-    fit_image_generator(dataset, test_dataset)
+
     print(f"class_num:{dataset.class_num}")
     weight_param_path = f"model/{BASE_MODEL}.weights.best.hdf5"
-    # model = create_model(input_shape=(IMAGE_SIZE//2, IMAGE_SIZE//2, TRAIN_COLOR_NUM))
-    model = create_model(dataset=dataset, input_shape=(IMAGE_SIZE, IMAGE_SIZE, 3))
+    model = create_model(dataset=dataset, input_shape=(IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM))
     model = build_model(model, weight_param_path)
     for i in range(0, 1):
         print(f"num:{i}. start train")
