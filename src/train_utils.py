@@ -49,15 +49,15 @@ seq = iaa.Sequential([
 
 
 def create_callbacks(dataset: Dataset, name_weights, patience_lr=10, patience_es=150):
-    # mcp_save = AllModelCheckpoint(name_weights,
-    #                               save_best_only=True, monitor='val_loss', mode='min')
-    mcp_save = AllModelCheckpoint(name_weights)
+    mcp_save = ModelCheckpoint(name_weights,
+                               save_best_only=True, monitor='val_loss', mode='min')
+    # mcp_save = AllModelCheckpoint(name_weights)
     # reduce_lr_loss = ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=patience_lr, verbose=1, min_delta=1e-4, mode='min')
-    # early_stopping = EarlyStopping(monitor='val_loss', patience=patience_es, verbose=1, mode='auto')
+    early_stopping = EarlyStopping(monitor='val_loss', patience=patience_es, verbose=1, mode='auto')
     # return [early_stopping, mcp_save, reduce_lr_loss]
     # return [f1metrics, early_stopping, mcp_save]
-    # return [early_stopping, mcp_save, dataset]
-    return [mcp_save, dataset]
+    return [early_stopping, mcp_save, dataset]
+    # return [mcp_save, dataset]
 
 
 def load_dataset(filename):
@@ -104,6 +104,7 @@ def next_dataset(dataset: Dataset, batch_size: int, datatype: DataType):
 
             # make negative
             candidate_indices = np.argsort(dataset.score[index])
+            # print(f"candidate_indices:{candidate_indices} sorted_score:{np.sort(dataset.score[index])}")
             for candidate_index in candidate_indices:
                 if datatype == DataType.train and candidate_index not in dataset.train_index_list:
                     continue
@@ -138,15 +139,15 @@ def train_model(model: Model, dataset: Dataset, model_filename: str,
     train_num = (sample_num * TRAIN_RATIO)
     validate_num = (sample_num * VALIDATE_RATIO)
     steps_per_epoch = train_num // batch_size
-    steps_per_epoch = 50
+    # steps_per_epoch = 50
     validation_steps = validate_num // batch_size
     print(f"new_whale_num:{new_whale_num} sample_num:{sample_num} train_num:{train_num} validate_num:{validate_num}")
 
     model.fit_generator(generator=next_dataset(dataset, batch_size, DataType.train),
                         epochs=epochs,
-                        # validation_data=next_dataset(dataset, batch_size, DataType.validate),
+                        validation_data=next_dataset(dataset, batch_size, DataType.validate),
                         steps_per_epoch=steps_per_epoch,
-                        # validation_steps=validation_steps,
+                        validation_steps=validation_steps,
                         callbacks=callbacks, verbose=1)
 
 

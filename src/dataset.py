@@ -38,10 +38,10 @@ VALIDATE_RATIO = 0.1
 TEST_RATIO = 0.05
 BOUNDING_BOX_MAP = 'bounding-box-map.pickle'
 
-IMAGE_SIZE = 256
+IMAGE_SIZE = int(128 * 1.5)
 IMAGE_DIM = 1
 BATCH_SIZE = 5
-EPOCHS = 30
+EPOCHS = 5
 NEW_LABEL = 'new_whale'
 ROI_MAP = {}
 
@@ -120,20 +120,31 @@ class Dataset(Callback):
                 x = create_unit_dataset(self, data_unit)
                 inputs.append(x)
             inputs = np.array(inputs).reshape((-1, IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM))
-            print(f"data_units:{len(data_units)} inputs:{np.array(inputs).shape}")
+            # print(f"data_units:{len(data_units)} inputs:{np.array(inputs).shape}")
             predicts = self.model.submodel.predict([inputs])
-            print(f"predicts:{predicts.shape}")
+            # print(f"predicts:{predicts.shape}")
             predicts = predicts.tolist()
             train_preds += predicts
         print(f"train_preds:{np.array(train_preds).shape}")
         self.score = pairwise_distances(train_preds)
         np.fill_diagonal(self.score, 0.0)
-        print("finished calculating score")
+        print(f"finished calculating score. score:{self.score.shape}")
+
+    def propagate_weights(self):
+        anchor_model = self.model.triplet_models[0]
+        pos_model = self.model.triplet_models[1]
+        neg_model = self.model.triplet_models[2]
+        for index, layer in enumerate(anchor_model.layers):
+            pos_model.layers[index].set_weights(layer.get_weights())
+            pos_model.layers[index].trainable = False
+            neg_model.layers[index].set_weights(layer.get_weights())
+            neg_model.layers[index].trainable = False
 
     def on_epoch_end(self, epoch, logs=None):
         self.lock.acquire()
         try:
             self.calc_score()
+            # self.propagate_weights()
             self.set_index_list()
         finally:
             self.lock.release()

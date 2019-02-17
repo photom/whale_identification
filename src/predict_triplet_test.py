@@ -68,21 +68,18 @@ def predict(data_unit: DataUnit, dataset: Dataset, test_model: Model):
 
 
 def main():
-    weight_param_path = f"model/{BASE_MODEL}.weights.best.hdf5"
-
     dataset = load_raw_data()
     test_dataset = load_test_data()
-    test_model = build_inference_model(weight_param_path, dataset,
-                                       input_shape=(IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM), datatype=DataType.test)
-    test_model.compile(loss="mse", optimizer=Adam(0.000001))
-
+    weight_param_path = f"model/{BASE_MODEL}.weights.best.hdf5"
+    model = create_model(dataset=dataset, input_shape=(IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM))
+    model = build_model(model, weight_param_path)
     train_preds = []
     train_data_list = []
     for data_unit in dataset.data_list:
         if data_unit.answer == NEW_LABEL:
             continue
         x = create_unit_dataset(dataset, data_unit)
-        predicts = test_model.predict([x])
+        predicts = model.submodel.predict([x])
         predicts = predicts.tolist()
         train_preds += predicts
         train_data_list.append(data_unit)
@@ -94,7 +91,7 @@ def main():
     test_data_list = []
     for data_unit in test_dataset.data_list:
         x = create_unit_dataset(dataset, data_unit)
-        predicts = test_model.predict(x)
+        predicts = model.submodel.predict(x)
         predicts = predicts.tolist()
         test_preds += predicts
         test_data_list.append(data_unit)
@@ -122,7 +119,7 @@ def main():
             # pbr
             # sample_result.append((NEW_LABEL, 0.0002))
             # alpha
-            sample_result.append((NEW_LABEL, 0.0010))
+            sample_result.append((NEW_LABEL, 0.175))
         sample_result.sort(key=lambda x: x[1])
         print(f"sample:{sample_result}")
         sample_result = sample_result[:5]

@@ -20,6 +20,12 @@ from keras_contrib.layers import advanced_activations
 from keras.layers import Activation, Dropout, Flatten, Dense, Input, Conv2D, MaxPooling2D, BatchNormalization, \
     Concatenate, ReLU, LeakyReLU
 import tensorflow as tf
+from keras import regularizers
+from keras.optimizers import Adam
+from keras.engine.topology import Input
+from keras.layers import Activation, Add, BatchNormalization, Concatenate, Conv2D, Dense, Flatten, GlobalMaxPooling2D, \
+    Lambda, MaxPooling2D, Reshape
+from keras.models import Model
 
 from dataset import *
 from train_utils import *
@@ -240,7 +246,7 @@ class TripletLossLayer(Layer):
 
 
 def build_triplet_trunk_model(input_tensor, dropout=0.5, datatype: DataType = DataType.train,
-                              layer_name='anchor'):
+                              layer_name='anchor', trainable=True):
     # Convolutional Neural Network
     # base_input = Input(shape=input_shape)
     # base_model = ResNet50(weights='imagenet', include_top=False, input_tensor=input_tensor, pooling=None)
@@ -248,8 +254,6 @@ def build_triplet_trunk_model(input_tensor, dropout=0.5, datatype: DataType = Da
 
     x = GlobalAveragePooling2D()(base_model.layers[-1].output)
     # x = GlobalMaxPooling2D()(base_model.output)
-    if datatype != DataType.test:
-        x = Dropout(dropout)(x)
     # x = Dense(4096)(x)
     # x = BatchNormalization()(x)
     # x = Dense(1024, activation='sigmoid')(x)
@@ -261,13 +265,16 @@ def build_triplet_trunk_model(input_tensor, dropout=0.5, datatype: DataType = Da
     # if datatype != DataType.test:
     #     x = Dropout(dropout)(x)
     x = Dense(256, name='dense_layer')(x)
+    # if datatype != DataType.test:
+    #     x = Dropout(dropout)(x)
+    # x = BatchNormalization()(x)
     # L2 normalization
     x = Lambda(lambda xi: K.l2_normalize(xi, axis=1))(x)
-
+    # x = Dense(1, use_bias=True, name='weighted_average')(x)
     tmp_model = Model(input_tensor, x)
     for idx, layer in enumerate(tmp_model.layers):
-        layer.trainable = True
-        # layer.name = f"{layer_name}_{idx}"
+        layer.trainable = trainable
+        layer.name = f"{layer_name}_{idx}"
     return tmp_model
 
 
@@ -277,10 +284,16 @@ def create_model_triplet_loss(dataset: Dataset, input_shape, dropout=0.5, dataty
     positive_input = Input(shape=input_shape)
     negative_input = Input(shape=input_shape)
     base_input = Input(shape=input_shape)
+    # anchor_model = build_triplet_trunk_model(anchor_input, dropout, datatype,
+    #                                          layer_name='anchor', trainable=True)
+    # pos_model = build_triplet_trunk_model(positive_input, dropout, datatype,
+    #                                       layer_name='positive', trainable=False)
+    # neg_model = build_triplet_trunk_model(negative_input, dropout, datatype,
+    #                                       layer_name='negative', trainable=False)
     trunk_model = build_triplet_trunk_model(base_input, dropout, datatype)
-    anchor_embedding = trunk_model(anchor_input)
-    positive_embedding = trunk_model(positive_input)
-    negative_embedding = trunk_model(negative_input)
+    anchor_embedding = trunk_model([anchor_input])
+    positive_embedding = trunk_model([positive_input])
+    negative_embedding = trunk_model([negative_input])
     # distance_func = Lambda(lambda tensors: K.sum(K.square(tensors[0] - tensors[1]), axis=1, keepdims=True),
     #                        name='distance')
     # triplet_loss_func = Lambda(lambda loss: K.maximum(loss[0] - loss[1] + alpha, 0.0),
@@ -313,11 +326,13 @@ def create_model_triplet_loss(dataset: Dataset, input_shape, dropout=0.5, dataty
     # triplet_loss_layer = TripletLossLayer(alpha=0.2, name='triplet_loss_layer')([embedding_a, embedding_p, embedding_n])
     # model = Model([anchor_input, positive_input, negative_input], triplet_loss_layer)
     model.submodel = trunk_model
+    # model.triplet_models = [anchor_model, pos_model, neg_model]
+    model.triplet_models = [trunk_model]
     model.summary()
     return model
 
 
-def calc_triplet_loss(x, alpha=0.01):
+def calc_triplet_loss(x, alpha=0.2):
     anchor, positive, negative = x
 
     pos_dist = tf.reduce_sum(tf.square(tf.subtract(anchor, positive)), 1)
@@ -368,6 +383,96 @@ def bpr_triplet_loss(X):
         K.sum(user_latent * positive_item_latent, axis=-1, keepdims=True) -
         K.sum(user_latent * negative_item_latent, axis=-1, keepdims=True))
     return loss
+
+
+def subblock(x, filter, **kwargs):
+    x = BatchNormalization()(x)
+    y = x
+    y = Conv2D(filter, (1, 1), activation='relu', **kwargs)(y)  # Reduce the number of features to 'filter'
+    y = BatchNormalization()(y)
+    y = Conv2D(filter, (3, 3), activation='relu', **kwargs)(y)  # Extend the feature field
+    y = BatchNormalization()(y)
+    y = Conv2D(K.int_shape(x)[-1], (1, 1), **kwargs)(y)  # no activation # Restore the number of original features
+    y = Add()([x, y])  # Add the bypass connection
+    y = Activation('relu')(y)
+    return y
+
+
+def create_martine_model(lr=64e-5, l2=0, activation='sigmoid'):
+    ##############
+    # BRANCH MODEL
+    ##############
+    regul = regularizers.l2(l2)
+    optim = Adam(lr=lr)
+    kwargs = {'padding': 'same', 'kernel_regularizer': regul}
+    img_shape = (IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM)
+    inp = Input(shape=img_shape)  # 384x384x1
+    x = Conv2D(64, (9, 9), strides=2, activation='relu', **kwargs)(inp)
+
+    x = MaxPooling2D((2, 2), strides=(2, 2))(x)  # 96x96x64
+    for _ in range(2):
+        x = BatchNormalization()(x)
+        x = Conv2D(64, (3, 3), activation='relu', **kwargs)(x)
+
+    x = MaxPooling2D((2, 2), strides=(2, 2))(x)  # 48x48x64
+    x = BatchNormalization()(x)
+    x = Conv2D(128, (1, 1), activation='relu', **kwargs)(x)  # 48x48x128
+    for _ in range(4): x = subblock(x, 64, **kwargs)
+
+    x = MaxPooling2D((2, 2), strides=(2, 2))(x)  # 24x24x128
+    x = BatchNormalization()(x)
+    x = Conv2D(256, (1, 1), activation='relu', **kwargs)(x)  # 24x24x256
+    for _ in range(4): x = subblock(x, 64, **kwargs)
+
+    x = MaxPooling2D((2, 2), strides=(2, 2))(x)  # 12x12x256
+    x = BatchNormalization()(x)
+    x = Conv2D(384, (1, 1), activation='relu', **kwargs)(x)  # 12x12x384
+    for _ in range(4): x = subblock(x, 96, **kwargs)
+
+    x = MaxPooling2D((2, 2), strides=(2, 2))(x)  # 6x6x384
+    x = BatchNormalization()(x)
+    x = Conv2D(512, (1, 1), activation='relu', **kwargs)(x)  # 6x6x512
+    for _ in range(4): x = subblock(x, 128, **kwargs)
+
+    x = GlobalMaxPooling2D()(x)  # 512
+    branch_model = Model(inp, x)
+
+    ############
+    # HEAD MODEL
+    ############
+    mid = 32
+    xa_inp = Input(shape=branch_model.output_shape[1:])
+    xb_inp = Input(shape=branch_model.output_shape[1:])
+    x1 = Lambda(lambda x: x[0] * x[1])([xa_inp, xb_inp])
+    x2 = Lambda(lambda x: x[0] + x[1])([xa_inp, xb_inp])
+    x3 = Lambda(lambda x: K.abs(x[0] - x[1]))([xa_inp, xb_inp])
+    x4 = Lambda(lambda x: K.square(x))(x3)
+    x = Concatenate()([x1, x2, x3, x4])
+    x = Reshape((4, branch_model.output_shape[1], 1), name='reshape1')(x)
+
+    # Per feature NN with shared weight is implemented using CONV2D with appropriate stride.
+    x = Conv2D(mid, (4, 1), activation='relu', padding='valid')(x)
+    x = Reshape((branch_model.output_shape[1], mid, 1))(x)
+    x = Conv2D(1, (1, mid), activation='linear', padding='valid')(x)
+    x = Flatten(name='flatten')(x)
+
+    # Weighted sum implemented as a Dense layer.
+    x = Dense(1, use_bias=True, activation=activation, name='weighted-average')(x)
+    head_model = Model([xa_inp, xb_inp], x, name='head')
+
+    ########################
+    # SIAMESE NEURAL NETWORK
+    ########################
+    # Complete model is constructed by calling the branch model on each input image,
+    # and then the head model on the resulting 512-vectors.
+    img_a = Input(shape=img_shape)
+    img_b = Input(shape=img_shape)
+    xa = branch_model(img_a)
+    xb = branch_model(img_b)
+    x = head_model([xa, xb])
+    model = Model([img_a, img_b], x)
+    model.compile(optim, loss='binary_crossentropy', metrics=['binary_crossentropy', 'acc'])
+    return model, branch_model, head_model
 
 
 def identity_loss(y_true, y_pred):
@@ -424,14 +529,15 @@ def build_anchor_model(weight_path: str, input_shape,
     return anchor_input, inference_model
 
 
-def build_model(model: Model, model_filename: str = None, learning_rate=0.000005):
+def build_model(model: Model, model_filename: str = None, learning_rate=0.0000001):
     if model_filename and os.path.exists(model_filename):
         print(f"load weights: file={model_filename}")
         model.load_weights(model_filename)
     submodel_filename = f"{model_filename}.submodel"
     if submodel_filename and os.path.exists(submodel_filename):
         print(f"load weights: file={submodel_filename}")
-        model.submodel.load_weights(submodel_filename)
+        for submodel in model.triplet_models:
+            submodel.load_weights(submodel_filename)
 
     opt = Adam(lr=learning_rate, beta_1=0.9, beta_2=0.999)
     model.compile(
