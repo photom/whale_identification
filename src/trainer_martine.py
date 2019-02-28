@@ -1,34 +1,48 @@
-import mpl_toolkits  # import before pathlib
+#!/usr/bin/env python
+
+import mpl_toolkits # import before pathlib
 import sys
-from pathlib import Path
+import pathlib
+import gc
+from typing import Optional
 
-from tensorflow import set_random_seed
 from sklearn.neighbors import NearestNeighbors
+from tensorflow import set_random_seed
 
-sys.path.append(Path(__file__).parent)
+# sys.path.append(pathlib.Path(__file__).parent)
+from train_utils import *
 from model import *
 from dataset import *
-from metrics import *
 
 np.random.seed(RANDOM_NUM)
 set_random_seed(RANDOM_NUM)
 
 OUTPUT_FILE = 'test_dataset_prediction.txt'
-# BASE_MODEL = 'resnet50'
-# BASE_MODEL = 'vgg11'
+
+# BASE_MODEL = 'vgg19'
 # BASE_MODEL = 'incepstionresnetv2'
+# BASE_MODEL = 'resnet50'
+# BASE_MODEL = 'resnet152'
 # BASE_MODEL = 'adams'
 # BASE_MODEL = 'michel'
+# BASE_MODEL = 'mobilenet'
+# BASE_MODEL = 'local'
 # BASE_MODEL = 'giim'
-# BASE_MODEL = 'siamese_resnet'
+# BASE_MODEL = 'siamese'
 # BASE_MODEL = 'triplet_loss'
 BASE_MODEL = 'martine'
 if BASE_MODEL == 'resnet50':
     create_model = create_model_resnet50_plain
+elif BASE_MODEL == 'resnet152':
+    create_model = create_model_resnet152_plain
 elif BASE_MODEL == 'incepstionresnetv2':
     create_model = create_model_inceptionresnetv2_plain
+elif BASE_MODEL == 'mobilenet':
+    create_model = create_model_mobilenet
 elif BASE_MODEL == 'giim':
     create_model = create_model_giim
+elif BASE_MODEL == 'siamese':
+    create_model = create_model_siamese
 elif BASE_MODEL == 'siamese_resnet':
     create_model = create_model_siamese_resnet
 elif BASE_MODEL == 'triplet_loss':
@@ -39,43 +53,14 @@ else:
     raise Exception("unimplemented model")
 
 
-def predict(data_unit: DataUnit, dataset: Dataset, test_model: Model):
-    x = create_unit_dataset(dataset, data_unit)
-    prediction_results = []
-    for label, data_list in dataset.class_map.items():
-        if label == NEW_LABEL:
-            continue
-        x_compare_to = []
-        x_compared = []
-        if len(data_list) > 10:
-            compare_to_data_list = np.random.choice(data_list, 10)
-        else:
-            compare_to_data_list = data_list
-        for compare_to_data_unit in compare_to_data_list:
-            x_compared.append(x)
-            x_compare_to.append(create_unit_dataset(dataset, compare_to_data_unit))
-        x_input = [np.array(x_compared).reshape((-1, IMAGE_SIZE, IMAGE_SIZE, 3)),
-                   np.array(x_compare_to).reshape((-1, IMAGE_SIZE, IMAGE_SIZE, 3))]
-        y_pred = test_model.predict(x_input, batch_size=len(compare_to_data_list))
-        y_pred = np.sort(y_pred[0])
-        if len(y_pred) > 2:
-            y_pred = y_pred[1:-1]
-        prediction_results.append((label, y_pred.mean()))
-
-    print(f"{prediction_results}")
-    sorted(prediction_results, key=lambda tup: (-tup[1], tup[0]))
-    results = [result[0] for result in prediction_results[:5]]
-    if prediction_results[4][1] < 0.5:
-        results[4] = NEW_LABEL
-    return results
-
-
-def main():
-    dataset = load_raw_data()
+def test(dataset: Optional[Dataset], model: Optional[Model]):
+    if dataset is None:
+        dataset = load_raw_data()
     test_dataset = load_test_data()
     weight_param_path = f"model/{BASE_MODEL}.weights.best.hdf5"
-    model = create_model(dataset=dataset, input_shape=(IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM))
-    model = build_model(model, weight_param_path)
+    if model is None:
+        model = create_model(dataset=dataset, input_shape=(IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM))
+        model = build_model(model, weight_param_path)
     train_preds = []
     train_data_list = []
     for data_unit in dataset.data_list:
@@ -122,9 +107,7 @@ def main():
             # pbr
             # sample_result.append((NEW_LABEL, 0.0002))
             # alpha
-            # sample_result.append((NEW_LABEL, 0.175))
-            # martine
-            sample_result.append((NEW_LABEL, 30.0))
+            sample_result.append((NEW_LABEL, 27))
         sample_result.sort(key=lambda x: x[1])
         print(f"sample:{sample_result}")
         sample_result = sample_result[:5]
@@ -132,6 +115,21 @@ def main():
         df = df.append(pd.DataFrame([[data_unit.filename, pred_str]], columns=['Image', 'Id']),
                        ignore_index=True)
     df.to_csv(OUTPUT_FILE, index=False)
+
+
+def main():
+    dataset = load_raw_data()
+
+    print(f"class_num:{dataset.class_num}")
+    weight_param_path = f"model/{BASE_MODEL}.weights.best.hdf5"
+    model = create_model(dataset=dataset, input_shape=(IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM))
+    model = build_model(model, weight_param_path)
+    # model = create_martine_model()
+    for i in range(0, 1):
+        print(f"num:{i}. start train")
+        train_model(model, dataset, weight_param_path)
+    model.save(weight_param_path)
+    test(dataset, model)
 
 
 if __name__ == "__main__":

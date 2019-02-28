@@ -38,6 +38,7 @@ def elu(x, alpha=0.05):
 
 def create_model_resnet50_plain(dataset: Dataset, input_shape, dropout=0.3, datatype: DataType = DataType.train):
     """
+    loss: 0.1914 - acc: 0.9441 - val_loss: 1.4599 - val_acc: 0.6710 test_acc:0.347
     Function creating the model's graph in Keras.
     Argument:
     input_shape -- shape of the model's input data (using Keras conventions)
@@ -46,6 +47,7 @@ def create_model_resnet50_plain(dataset: Dataset, input_shape, dropout=0.3, data
     """
     base_input = Input(shape=input_shape)
     base_model = ResNet50(weights='imagenet', include_top=False, input_tensor=base_input, pooling=None)
+    # base_model = ResNet50(weights=None, include_top=False, input_tensor=base_input, pooling=None)
     x = GlobalAveragePooling2D()(base_model.layers[-1].output)
     # x = BatchNormalization()(x)
     # if datatype != DataType.test:
@@ -398,14 +400,17 @@ def subblock(x, filter, **kwargs):
     return y
 
 
-def create_martine_model(lr=64e-5, l2=0, activation='sigmoid'):
+def create_martine_model(dataset: Dataset, input_shape, dropout=0.5, datatype: DataType = DataType.train):
+    lr = 64e-5
+    l2 = 0
+    activation = 'sigmoid'
     ##############
     # BRANCH MODEL
     ##############
     regul = regularizers.l2(l2)
-    optim = Adam(lr=lr)
+    # optim = Adam(lr=lr)
     kwargs = {'padding': 'same', 'kernel_regularizer': regul}
-    img_shape = (IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM)
+    img_shape = input_shape
     inp = Input(shape=img_shape)  # 384x384x1
     x = Conv2D(64, (9, 9), strides=2, activation='relu', **kwargs)(inp)
 
@@ -471,8 +476,12 @@ def create_martine_model(lr=64e-5, l2=0, activation='sigmoid'):
     xb = branch_model(img_b)
     x = head_model([xa, xb])
     model = Model([img_a, img_b], x)
-    model.compile(optim, loss='binary_crossentropy', metrics=['binary_crossentropy', 'acc'])
-    return model, branch_model, head_model
+    # model.compile(optim, loss='binary_crossentropy', metrics=['binary_crossentropy', 'acc'])
+    model.submodel = branch_model
+    model.branch_model = branch_model
+    model.head_model = head_model
+    model.summary()
+    return model
 
 
 def identity_loss(y_true, y_pred):
@@ -529,26 +538,27 @@ def build_anchor_model(weight_path: str, input_shape,
     return anchor_input, inference_model
 
 
-def build_model(model: Model, model_filename: str = None, learning_rate=0.0000001):
+def build_model(model: Model, model_filename: str = None, learning_rate=64e-5):
     if model_filename and os.path.exists(model_filename):
         print(f"load weights: file={model_filename}")
         model.load_weights(model_filename)
     submodel_filename = f"{model_filename}.submodel"
     if submodel_filename and os.path.exists(submodel_filename):
         print(f"load weights: file={submodel_filename}")
-        for submodel in model.triplet_models:
-            submodel.load_weights(submodel_filename)
+        # for submodel in model.triplet_models:
+        #     submodel.load_weights(submodel_filename)
+        model.submodel.load_weights(submodel_filename)
 
-    opt = Adam(lr=learning_rate, beta_1=0.9, beta_2=0.999)
+    opt = Nadam(lr=learning_rate, beta_1=0.9, beta_2=0.999)
     model.compile(
         # optimizer=keras.optimizers.Adadelta(),
         optimizer=opt,
-        loss=identity_loss,
+        # loss=identity_loss,
         # loss=keras.losses.mean_absolute_error,
-        # loss=keras.losses.binary_crossentropy,
+        loss=keras.losses.binary_crossentropy,
         # loss=keras.losses.categorical_crossentropy,
         # loss=max_average_precision,
-        # metrics=['acc'], )
-    )
+        metrics=['acc'], )
+    # )
 
     return model

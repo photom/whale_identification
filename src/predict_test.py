@@ -14,14 +14,14 @@ np.random.seed(RANDOM_NUM)
 set_random_seed(RANDOM_NUM)
 
 OUTPUT_FILE = 'test_dataset_prediction.txt'
-# BASE_MODEL = 'resnet50'
+BASE_MODEL = 'resnet50'
 # BASE_MODEL = 'vgg11'
 # BASE_MODEL = 'incepstionresnetv2'
 # BASE_MODEL = 'adams'
 # BASE_MODEL = 'michel'
 # BASE_MODEL = 'giim'
 # BASE_MODEL = 'siamese_resnet'
-BASE_MODEL = 'triplet_loss'
+# BASE_MODEL = 'triplet_loss'
 if BASE_MODEL == 'resnet50':
     create_model = create_model_resnet50_plain
 elif BASE_MODEL == 'incepstionresnetv2':
@@ -36,99 +36,38 @@ else:
     raise Exception("unimplemented model")
 
 
-def predict(data_unit: DataUnit, dataset: Dataset, test_model: Model):
+def predict(dataset: Dataset, data_unit: DataUnit, test_model: Model):
     x = create_unit_dataset(dataset, data_unit)
-    prediction_results = []
-    for label, data_list in dataset.class_map.items():
-        if label == NEW_LABEL:
-            continue
-        x_compare_to = []
-        x_compared = []
-        if len(data_list) > 10:
-            compare_to_data_list = np.random.choice(data_list, 10)
-        else:
-            compare_to_data_list = data_list
-        for compare_to_data_unit in compare_to_data_list:
-            x_compared.append(x)
-            x_compare_to.append(create_unit_dataset(dataset, compare_to_data_unit))
-        x_input = [np.array(x_compared).reshape((-1, IMAGE_SIZE, IMAGE_SIZE, 3)),
-                   np.array(x_compare_to).reshape((-1, IMAGE_SIZE, IMAGE_SIZE, 3))]
-        y_pred = test_model.predict(x_input, batch_size=len(compare_to_data_list))
-        y_pred = np.sort(y_pred[0])
-        if len(y_pred) > 2:
-            y_pred = y_pred[1:-1]
-        prediction_results.append((label, y_pred.mean()))
-
-    print(f"{prediction_results}")
-    sorted(prediction_results, key=lambda tup: (-tup[1], tup[0]))
-    results = [result[0] for result in prediction_results[:5]]
-    if prediction_results[4][1] < 0.5:
-        results[4] = NEW_LABEL
-    return results
+    y_pred = test_model.predict(x.reshape(1, IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM))
+    # result = test_model.predict(np.array(x))
+    # y_pred = np.array(y_pred[0])
+    # print(f"{y_pred}")
+    # sorted_indices = np.array(result[0]).argpartition(-5)[-5:]
+    # sorted_indices = np.argsort(-result)[:5]
+    sorted_indices = np.argsort(y_pred)[0][::-1][:5]
+    # print(sorted_indices)
+    # print(np.array(y_pred[0])[sorted_indices])
+    return list(sorted_indices)
 
 
 def main():
-    weight_param_path = f"model/{BASE_MODEL}.weights.best.hdf5"
-
     dataset = load_raw_data()
+    test_model = create_model(dataset, input_shape=(IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM), datatype=DataType.test)
     test_dataset = load_test_data()
-    fit_image_generator(dataset, test_dataset)
-    test_model = build_inference_model(weight_param_path, dataset,
-                                       input_shape=(IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM), datatype=DataType.test)
-    test_model.compile(loss="mse", optimizer=Adam(0.000001))
+    weight_param_path = f"model/{BASE_MODEL}.weights.best.hdf5"
+    test_model.load_weights(weight_param_path)
+    content = "Image,Id\n"
+    for i in range(len(test_dataset.data_list)):
+        data_unit = test_dataset.data_list[i]
+        y_pred = predict(dataset, data_unit, test_model)
+        decoded = dataset.label_onehot_encoder.inverse_labels(y_pred)
+        # decoded = [decode_map[idx] for idx in predicted]
+        joined = " ".join(decoded)
+        print(f"i:{i} y_pred:{y_pred} {joined} ")
+        content += f"{data_unit.filename},{joined}\n"
 
-    train_preds = []
-    train_data_list = []
-    for data_unit in dataset.data_list:
-        if data_unit.answer == NEW_LABEL:
-            continue
-        x = create_unit_dataset(dataset, data_unit)
-        predicts = test_model.predict([x])
-        # print(f"predicts:{predicts}")
-        predicts = predicts.tolist()
-        train_preds += predicts
-        train_data_list.append(data_unit)
-    train_preds = np.array(train_preds)
-    print(f"train_preds:{train_preds.shape}")
-    # print(f"train_preds:{train_preds}")
-
-    test_preds = []
-    test_data_list = []
-    for data_unit in test_dataset.data_list:
-        x = create_unit_dataset(dataset, data_unit)
-        predicts = test_model.predict(x)
-        predicts = predicts.tolist()
-        test_preds += predicts
-        test_data_list.append(data_unit)
-    test_preds = np.array(test_preds)
-    print(f"test_preds: {test_preds.shape}")
-    # print(f"test_preds:{test_preds}")
-
-    neigh = NearestNeighbors(n_neighbors=6)
-    neigh.fit(train_preds)
-    # distances, neighbors = neigh.kneighbors(train_preds)
-    # print(distances, neighbors)
-    distances_test, neighbors_test = neigh.kneighbors(test_preds)
-    distances_test, neighbors_test = distances_test.tolist(), neighbors_test.tolist()
-    preds_str = []
-
-    df = pd.DataFrame([], columns=['Image', 'Id'])
-    for data_unit, distance, neighbour_ in zip(test_data_list, distances_test, neighbors_test):
-        sample_result = []
-        sample_classes = []
-        for d, n in zip(distance, neighbour_):
-            train_data_unit = train_data_list[n]
-            sample_classes.append(train_data_unit.answer)
-            sample_result.append((train_data_unit.answer, d))
-
-        if NEW_LABEL not in sample_classes:
-            sample_result.append((NEW_LABEL, 0.1))
-        sample_result.sort(key=lambda x: x[1])
-        sample_result = sample_result[:5]
-        pred_str = " ".join([x[0] for x in sample_result])
-        df = df.append(pd.DataFrame([[data_unit.filename, pred_str]], columns=['Image', 'Id']),
-                       ignore_index=True)
-    df.to_csv(OUTPUT_FILE, index=False)
+    with open(OUTPUT_FILE, 'w') as f:
+        f.write(content)
 
 
 if __name__ == "__main__":

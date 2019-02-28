@@ -111,8 +111,9 @@ def read_for_validation(p):
 
 # Read an image for validation, i.e. without data augmentation.
 def normalize(x):
-    x -= np.mean(x, keepdims=True)
-    x /= np.std(x, keepdims=True) + K.epsilon()
+    # x -= np.mean(x, keepdims=True)
+    # x /= np.std(x, keepdims=True) + K.epsilon()
+    x = (x - x.min()) / (x.max() - x.min() + K.epsilon())
     return x
 
 

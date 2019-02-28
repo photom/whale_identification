@@ -29,7 +29,8 @@ OUTPUT_FILE = 'test_dataset_prediction.txt'
 # BASE_MODEL = 'local'
 # BASE_MODEL = 'giim'
 # BASE_MODEL = 'siamese'
-BASE_MODEL = 'triplet_loss'
+# BASE_MODEL = 'triplet_loss'
+BASE_MODEL = 'martine'
 if BASE_MODEL == 'resnet50':
     create_model = create_model_resnet50_plain
 elif BASE_MODEL == 'resnet152':
@@ -46,6 +47,8 @@ elif BASE_MODEL == 'siamese_resnet':
     create_model = create_model_siamese_resnet
 elif BASE_MODEL == 'triplet_loss':
     create_model = create_model_triplet_loss
+elif BASE_MODEL == 'martine':
+    create_model = create_martine_model
 else:
     raise Exception("unimplemented model")
 
@@ -126,7 +129,7 @@ def main():
         print(f"num:{i}. start train")
         train_model(model, dataset, weight_param_path)
     model.save(weight_param_path)
-    test(dataset, model)
+    # test(dataset, model)
 
 
 if __name__ == "__main__":

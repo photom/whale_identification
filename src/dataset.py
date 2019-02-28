@@ -38,9 +38,9 @@ VALIDATE_RATIO = 0.1
 TEST_RATIO = 0.05
 BOUNDING_BOX_MAP = 'bounding-box-map.pickle'
 
-IMAGE_SIZE = int(128 * 1.5)
-IMAGE_DIM = 1
-BATCH_SIZE = 5
+IMAGE_SIZE = int(128 * 3)
+IMAGE_DIM = 3
+BATCH_SIZE = 6
 EPOCHS = 5
 NEW_LABEL = 'new_whale'
 ROI_MAP = {}
@@ -90,6 +90,7 @@ class Dataset(Callback):
         self.validate_class_map = {}
         self.classes = np.array(list(class_map.keys()))
         self.class_num = len(self.classes)
+        # print(f"class_num:{self.class_num}")
         self.train_index_list = np.array([])
         self.validate_index_list = np.array([])
         self.train_counter = 0
@@ -102,8 +103,10 @@ class Dataset(Callback):
         np.fill_diagonal(self.score, 0.0)
 
     def on_train_begin(self, logs=None):
-        sss = RepeatedStratifiedKFold(n_splits=10, n_repeats=10, random_state=RANDOM_NUM)
+        sss = StratifiedKFold(n_splits=10, shuffle=True, random_state=np.random.randint(0, RANDOM_NUM))
         answers = np.array([data_unit.answer for data_unit in self.data_list])
+        # sss = RepeatedStratifiedKFold(n_splits=10, n_repeats=10, random_state=RANDOM_NUM)
+        # answers = np.array([data_unit.answer for data_unit in self.data_list])
         self.lock.acquire()
         try:
             self.index_generator = sss.split(np.zeros(answers.shape[0]), answers)
@@ -154,7 +157,8 @@ class Dataset(Callback):
         try:
             train_index, validate_index = next(self.index_generator)
         except StopIteration:
-            sss = RepeatedStratifiedKFold(n_splits=10, n_repeats=10, random_state=np.random.randint(0, RANDOM_NUM))
+            # sss = RepeatedStratifiedKFold(n_splits=10, n_repeats=10, random_state=np.random.randint(0, RANDOM_NUM))
+            sss = StratifiedKFold(n_splits=10, shuffle=True, random_state=np.random.randint(0, RANDOM_NUM))
             answers = np.array([data_unit.answer for data_unit in self.data_list])
             self.index_generator = sss.split(np.zeros(answers.shape[0]), answers)
             train_index, validate_index = next(self.index_generator)
@@ -196,6 +200,7 @@ class Dataset(Callback):
             data_unit = self.data_list[index]
             # wait until set_index_list finished
             while data_unit.answer == NEW_LABEL or data_unit.answer not in list(self.train_class_map.keys()):
+            # while data_unit.answer not in list(self.train_class_map.keys()):
                 self.increment_train()
                 index = self.train_index_list[self.train_counter]
                 data_unit = self.data_list[index]
@@ -212,6 +217,7 @@ class Dataset(Callback):
             data_unit = self.data_list[index]
             # wait until set_index_list finished
             while data_unit.answer == NEW_LABEL or data_unit.answer not in list(self.validate_class_map.keys()):
+            # while data_unit.answer not in list(self.validate_class_map.keys()):
                 self.increment_validate()
                 index = self.validate_index_list[self.validate_counter]
                 data_unit = self.data_list[index]
@@ -233,6 +239,7 @@ class DataUnit:
         self.answer = answer
         self.source_dir = source_dir
         self.uuid = str(uuid.uuid1())
+        self.encoded_answer = None
 
 
 def load_raw_data():
@@ -273,6 +280,22 @@ def load_raw_data():
                     (u0, v0), (u1, v1) = bounding_box.coord_transform([(x0, y0), (x1, y1)], trans)
                     coords = u0, v0, u1, v1
                     ROI_MAP[data_unit.filename] = coords
+
+    # set up one hot encoder
+    lohe = LabelOneHotEncoder()
+    y_list = lohe.fit_transform(answers).toarray()
+    for data_unit, y_encoded in zip(data_list, y_list):
+        data_unit.encoded_answer = y_encoded
+
+    # fitting image generator
+    # for data_unit in data_list:
+    #     x_list = []
+    #     x = extract_roi(data_unit)
+    #     # x = generate_input(data_unit)
+    #     x_list.append(x)
+    #     x_list = np.array(x_list)
+    #     x_list = x_list.reshape((-1, IMAGE_SIZE, IMAGE_SIZE, 3))
+    #     IMAGE_GEN.fit(x_list)
 
     # complement single class for stratified K-fold
     single_classes = []
@@ -336,7 +359,7 @@ def fit_image_generator(dataset: Dataset, test_dataset: TestDataset):
     # for data_list in [test_dataset.data_list, dataset.data_list]:
     for data_list in [dataset.data_list]:
         for data_unit in data_list:
-            x = extract_roi(dataset, data_unit)
+            x = extract_roi(data_unit)
             # x = generate_input(data_unit)
             x_list = np.array([x]).reshape((-1, IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM))
             IMAGE_GEN.fit(x_list)
@@ -363,14 +386,15 @@ def create_xy(dataset: Dataset, datatype: DataType):
         raise RuntimeError(f"invalid data type. type={str(datatype)}")
     # print(f"create_xy data_unit:{data_unit.answer}")
     # x = generate_input(data_unit)
-    x = extract_roi(dataset, data_unit)
+    x = extract_roi(data_unit)
     # x = normalize_image(x, data_unit)
-    y = dataset.classes.tolist().index(data_unit.answer)
+    # y = dataset.classes.tolist().index(data_unit.answer)
+    y = data_unit.encoded_answer
     # print(f"create_training_sample x:{x.shape} y:{y.shape}")
     return x, y, data_unit, index
 
 
-def make_square(img, min_size=10, fill_color=(0, 0, 0, 0)):
+def make_square(img, min_size=10, fill_color=(255, 255, 255)):
     x, y = img.size
     size = max(min_size, x, y)
     new_im = Image.new('RGB', (size, size), fill_color)
@@ -393,7 +417,7 @@ def generate_input(data_unit: DataUnit):
     return img
 
 
-def extract_roi(dataset: Dataset, data_unit: DataUnit):
+def extract_roi(data_unit: DataUnit):
     if data_unit.filename in ROI_MAP:
         coords = ROI_MAP[data_unit.filename]
     else:
@@ -401,19 +425,31 @@ def extract_roi(dataset: Dataset, data_unit: DataUnit):
     file_path = Path(data_unit.source_dir, data_unit.filename)
     img = Image.open(str(file_path))
     img = img.crop(coords)
+    # print(f"img0:{np.array(img).shape} name:{data_unit.filename}")
+    # img = make_square(img)
+    # print(f"img1:{np.array(img).shape}")
     img = img.resize((IMAGE_SIZE, IMAGE_SIZE), resample=Image.LANCZOS)
-    img = np.array(img.convert('L')).reshape(IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM)
-    # if img.ndim == 2:  # imported BW picture and converting to "dumb RGB"
-    #     img = np.tile(img, (3, 1, 1)).transpose((1, 2, 0))
+    # print(f"img1:{np.array(img).shape}")
+    # img.save("tmp/" + data_unit.filename)
+    # img = np.array(img.convert('L')).reshape(IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM)
+    # print(f"img2:{np.array(img).shape}")
+    img = np.array(img)
+    if img.ndim == 2:  # imported BW picture and converting to "dumb RGB"
+        img = np.tile(img, (3, 1, 1)).transpose((1, 2, 0))
+    img = img.reshape(IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM)
     # print(f"img:{img.shape}")
-    return bounding_box.normalize(img.astype("float32"))
+    img = bounding_box.normalize(img.astype("float32"))
+    # print(f"img3:{img.shape}")
+    return img
 
 
 def create_unit_dataset(dataset: Dataset, data_unit: DataUnit):
     # x = generate_input(data_unit)
-    x = extract_roi(dataset, data_unit)
+    x = extract_roi(data_unit)
     x = x.astype("float32")
-    return x.reshape(1, IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM)
+    # return x.reshape(1, IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM)
+    # return IMAGE_GEN.standardize(x.reshape(1, IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM))
+    return bounding_box.normalize(x.reshape(1, IMAGE_SIZE, IMAGE_SIZE, IMAGE_DIM))
 
 
 def load_dataset(filename):
